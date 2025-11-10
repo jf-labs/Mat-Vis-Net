@@ -9,11 +9,10 @@ It powers intelligent search and recommendation use cases for flooring retailers
 
 Traditional image classifiers can label a surface as *wood* or *tile*, but real-world flooring decisions require finer understanding:
 - Is this a **wood-look porcelain tile** or **true oak plank**?
-- Does it belong to the **Alto Bianco** or **Sand Dollar** collection?
 - Is the finish **matte** or **polished**?
 - Which products are **visually closest** to the one shown?
 
-SurfaceSense tackles these questions by combining:
+This Material Visual Network tackles these questions by combining:
 - **Transfer learning** for robust visual feature extraction.  
 - **Deep metric learning** for similarity search and clustering.  
 - **Multi-label classification** for attributes such as brand, tone, and finish.  
@@ -29,6 +28,4 @@ SurfaceSense tackles these questions by combining:
 - **Explainability:** Includes Grad-CAM visualizations for saliency inspection.  
 
 ---
-
-## 🏗️ Project Structure
 
