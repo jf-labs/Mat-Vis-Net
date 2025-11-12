@@ -1,0 +1,64 @@
+# ---- OS / Editor junk ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+env/
+
+# Python tooling
+.mypy_cache/
+.pytest_cache/
+.pyre/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local config / secrets
+.env
+.env.*
+!.env.example
+
+# ---- Node / Frontend (apps/client, etc.) ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.parcel-cache/
+.npm/
+.cache/
+
+# Build artifacts
+dist/
+build/
+*.log
+
+# ---- Data / Artifacts ----
+# Raw scraped data & large files (regenerate as needed)
+data/*.csv
+data/*.parquet
+data/*.json
+images/
+tmp/
+outputs/
+
+# ---- Notebooks temp ----
+.ipynb_checkpoints/
