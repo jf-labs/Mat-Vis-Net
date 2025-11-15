@@ -27,19 +27,19 @@ This repo is **early-stage / WIP** and currently focuses on **data collection**.
 
 Implemented so far:
 
-- Store-specific product scraper  
+- ✅ Store-specific product scraper  
   - Crawls category pages (e.g., tile, wood, vinyl)
   - Collects product URLs and metadata
   - Downloads primary product images and saves them by SKU
-- Basic local file structure for CSVs and images
+- ✅ Basic local file structure for CSVs and images
 
 Planned next steps:
 
-- Clean/dedupe images and handle identical images under different SKUs  
-- Build a Jupyter notebook for exploratory analysis and baseline models  
-- Train an image embedding model (e.g., CNN / CLIP-style)  
-- Implement top-K visual similarity search over the catalog  
-- Simple demo: upload an image --> get back likely matching SKUs
+- ⬜ Clean/dedupe images and handle identical images under different SKUs  
+- ⬜ Build a Jupyter notebook for exploratory analysis and baseline models  
+- ⬜ Train an image embedding model (e.g., CNN / CLIP-style)  
+- ⬜ Implement top-K visual similarity search over the catalog  
+- ⬜ Simple demo: upload an image → get back likely matching SKUs
 
 ---
 
