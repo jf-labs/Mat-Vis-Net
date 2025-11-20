@@ -19,17 +19,17 @@ import os
 import re
 import time
 from typing import Dict, List, Optional, Set
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 # ---------------------- CONFIG ----------------------
 
 BASE_URL = "https://www.flooranddecor.com"
 STORE_ID = 238  # San Leandro
 
-# Top-level categories to scan
+# Seed category slugs to make sure we at least cover these
 CATEGORY_SLUGS = [
     "/tile",
     "/wood",
@@ -41,12 +41,6 @@ CATEGORY_SLUGS = [
     "/installation-materials",
 ]
 
-# Product URL pattern:
-# e.g. https://www.flooranddecor.com/...-101363893.html
-PRODUCT_URL_RE = re.compile(
-    r"https://www\.flooranddecor\.com/[A-Za-z0-9_\-/]+-(\d{6,})\.html"
-)
-
 DATA_DIR = "data"
 IMAGES_DIR = "images"
 METADATA_CSV = os.path.join(DATA_DIR, "san_leandro_products.csv")
@@ -54,11 +48,20 @@ METADATA_CSV = os.path.join(DATA_DIR, "san_leandro_products.csv")
 REQUEST_TIMEOUT = 15
 SLEEP_BETWEEN_REQUESTS = 0.5  # seconds between requests
 
+# Safety valve so we don't accidentally spider the entire internet
+MAX_PAGES_PER_CATEGORY = 5000
+
 # ---------------------- LOGGING ----------------------
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+# Product URL pattern:
+# e.g. https://www.flooranddecor.com/...-101363893.html
+PRODUCT_URL_RE = re.compile(
+    r"https://www\.flooranddecor\.com/[A-Za-z0-9_\-/]+-(\d{6,})\.html"
 )
 
 # ---------------------- HTTP HELPERS ----------------------
@@ -93,6 +96,105 @@ def set_store_context(session: requests.Session) -> None:
     except Exception as e:
         logging.warning("Failed to set store context: %s", e)
 
+
+# ---------------------- CATEGORY DISCOVERY ----------------------
+
+
+def discover_category_slugs(session: requests.Session) -> List[str]:
+    """
+    Hit the site-wide sitemap and collect a *broad* set of category-like URLs.
+    We:
+      * start from CATEGORY_SLUGS
+      * add any internal, non-product URL whose path contains flooring-ish
+        keywords (tile, wood, vinyl, laminate, floor, wall, etc.)
+    This dramatically expands coverage beyond the small hardcoded list.
+    """
+    sitemap_url = urljoin(BASE_URL, "/sitemap")
+    slugs: Set[str] = set(CATEGORY_SLUGS)  # start from your existing list
+
+    try:
+        r = session.get(sitemap_url, timeout=REQUEST_TIMEOUT)
+        if r.status_code != 200:
+            logging.warning("Sitemap %s returned status %s", sitemap_url, r.status_code)
+            return sorted(slugs)
+    except Exception as e:
+        logging.warning("Failed to fetch sitemap %s: %s", sitemap_url, e)
+        return sorted(slugs)
+
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    category_keywords = [
+        "tile",
+        "stone",
+        "wood",
+        "vinyl",
+        "laminate",
+        "bathroom",
+        "kitchen",
+        "backsplash",
+        "decor",
+        "mosaic",
+        "countertop",
+        "floor",
+        "wall",
+        "stair",
+        "installation",
+        "fixtures",
+        "tools",
+        "grout",
+        "thinset",
+        "adhesive",
+    ]
+
+    skip_prefixes = (
+        "/customer-care",
+        "/about-us",
+        "/company",
+        "/pro-center",
+        "/pro",
+        "/account",
+        "/wishlist",
+        "/cart",
+        "/order",
+        "/signin",
+        "/login",
+        "/register",
+        "/faq",
+        "/help",
+        "/design-services",
+        "/blog",
+        "/videos",
+        "/galleries",
+    )
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if not href.startswith("/"):
+            continue
+
+        # Strip query params / fragments
+        href = href.split("?", 1)[0].split("#", 1)[0]
+        if not href or href == "/":
+            continue
+
+        low = href.lower()
+
+        # Skip obvious non-product sections
+        if low.startswith(skip_prefixes):
+            continue
+
+        # Skip product detail URLs (.html)
+        if low.endswith(".html"):
+            continue
+
+        # Only keep URLs that look flooring-related
+        if any(kw in low for kw in category_keywords):
+            slugs.add(href)
+
+    logging.info("Discovered %d category-like slugs from sitemap", len(slugs))
+    return sorted(slugs)
+
+
 # ---------------------- URL DISCOVERY ----------------------
 
 
@@ -100,52 +202,189 @@ def fetch_product_urls_for_category(
     session: requests.Session, category_slug: str
 ) -> Set[str]:
     """
-    Given a category slug like "/tile", fetch the main category page
-    and extract product detail URLs using PRODUCT_URL_RE.
+    Given a category slug like "/tile", crawl ALL listing / filter / search pages
+    reachable under that slug and extract product detail URLs using PRODUCT_URL_RE.
+
+    This is intentionally aggressive:
+      * Any internal link whose URL mentions the category token ("/tile" or "tile")
+        is followed (up to MAX_PAGES_PER_CATEGORY pages).
+      * We don't limit ourselves only to 'start=', 'page=', etc. query params anymore.
+
+    Returns a set of full product URLs.
     """
-    url = urljoin(BASE_URL, category_slug)
-    logging.info("Scanning category page: %s", url)
+    start_url = urljoin(BASE_URL, category_slug)
 
-    try:
-        r = session.get(url, timeout=REQUEST_TIMEOUT)
-    except Exception as e:
-        logging.warning("Failed to fetch category %s: %s", url, e)
-        return set()
-
-    if r.status_code != 200:
-        logging.warning("Category %s returned status %s", url, r.status_code)
-        return set()
-
-    html = r.text
-
+    to_visit: List[str] = [start_url]
+    visited: Set[str] = set()
     found_urls: Set[str] = set()
-    for match in PRODUCT_URL_RE.finditer(html):
-        full_url = match.group(0)
-        found_urls.add(full_url)
+
+    cat_token = category_slug.strip("/").lower()
+
+    while to_visit and len(visited) < MAX_PAGES_PER_CATEGORY:
+        url = to_visit.pop()
+        if url in visited:
+            continue
+        visited.add(url)
+
+        logging.info("Scanning category page (%s pages seen) %s", len(visited), url)
+        try:
+            r = session.get(url, timeout=REQUEST_TIMEOUT)
+        except Exception as e:
+            logging.warning("Failed to fetch category %s: %s", url, e)
+            continue
+
+        content_type = r.headers.get("Content-Type", "")
+        if r.status_code != 200 or "text/html" not in content_type:
+            logging.warning(
+                "Category %s returned status %s (Content-Type=%s)",
+                url,
+                r.status_code,
+                content_type,
+            )
+            continue
+
+        html = r.text
+
+        # --- collect product URLs from this page ---
+        for match in PRODUCT_URL_RE.finditer(html):
+            full_url = match.group(0)
+            found_urls.add(full_url)
+
+        # --- discover more listing pages to crawl ---
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href or href.startswith("#"):
+                continue
+            if href.lower().startswith("javascript:"):
+                continue
+
+            full = urljoin(BASE_URL, href)
+            if full in visited:
+                continue
+
+            parsed = urlparse(full)
+
+            # Stay inside main domain
+            if parsed.netloc and "flooranddecor.com" not in parsed.netloc:
+                continue
+
+            # If this anchor is itself a product detail URL, just record it
+            if PRODUCT_URL_RE.search(full):
+                found_urls.add(full)
+                continue
+
+            href_low = href.lower()
+
+            # Decide if this looks like a listing / filter / search page
+            in_same_family = False
+
+            # Same slug (/tile, /tile/..., /tile?... etc.)
+            if category_slug.lower() in href_low:
+                in_same_family = True
+            # Or category token in query path (/search?cgid=tile-something, etc.)
+            elif cat_token and cat_token in href_low:
+                in_same_family = True
+
+            if not in_same_family:
+                continue
+
+            # Looks relevant to this category; follow it
+            to_visit.append(full)
+
+        # be nice to the server
+        time.sleep(SLEEP_BETWEEN_REQUESTS)
 
     logging.info(
-        "Category %s -> %d candidate product URLs",
+        "Category %s -> %d candidate product URLs from %d listing pages (capped at %d)",
         category_slug,
         len(found_urls),
+        len(visited),
+        MAX_PAGES_PER_CATEGORY,
     )
     return found_urls
 
 
-def fetch_all_product_urls(session: requests.Session) -> Dict[str, Set[str]]:
+def fetch_all_product_urls(
+    session: requests.Session,
+    category_slugs: List[str],
+) -> Dict[str, Set[str]]:
     """
     For each category, collect product URLs.
     Returns {category_slug: {url1, url2, ...}}.
     """
     result: Dict[str, Set[str]] = {}
-    for slug in CATEGORY_SLUGS:
+    for slug in category_slugs:
         urls = fetch_product_urls_for_category(session, slug)
         if urls:
             result[slug] = urls
         time.sleep(SLEEP_BETWEEN_REQUESTS)
 
     total = sum(len(v) for v in result.values())
-    logging.info("Total unique product URLs found across categories: %d", total)
+    logging.info(
+        "Total unique product URLs found across %d categories: %d",
+        len(result),
+        total,
+    )
     return result
+
+
+# ---------------------- AVAILABILITY FILTER ----------------------
+
+
+def is_available_in_store(soup: BeautifulSoup) -> bool:
+    """
+    Heuristically determine if the product is actually stocked at the current store
+    (after set_store_context has been called).
+
+    Logic:
+      - Find the 'In-Store Pickup' block.
+      - If that block says 'Item will be shipped and should arrive in X days',
+        treat it as NOT stocked locally (ship-to-store only) and skip.
+      - Otherwise, keep it.
+
+    This specifically filters cases like:
+      In-Store Pickup
+      Item will be shipped and should arrive in 7-10 days.
+    """
+
+    # Find the "In-Store Pickup" label as a text node
+    pickup_node = soup.find(
+        string=lambda t: isinstance(t, NavigableString)
+        and "In-Store Pickup" in t
+    )
+
+    # If we can't find it, don't over-filter; assume it's fine
+    if not pickup_node:
+        return True
+
+    # Walk up ancestors to find the "card" that contains the pickup text
+    current = pickup_node.parent
+    for _ in range(5):
+        if current is None:
+            break
+
+        text = current.get_text(separator=" ", strip=True).lower()
+
+        if "in-store pickup" in text:
+            # Phrases that mean "not actually in stock at this store"
+            bad_phrases = [
+                "item will be shipped and should arrive in",
+                "not available at this store",
+                "online only",
+                "not sold in stores",
+            ]
+            if any(p in text for p in bad_phrases):
+                return False
+
+            # No bad phrase in the pickup block -> treat as in-store available
+            return True
+
+        current = current.parent
+
+    # Fallback if we never find a good container
+    return True
+
 
 # ---------------------- PARSING HELPERS ----------------------
 
@@ -289,6 +528,7 @@ def extract_product_image_url(soup: BeautifulSoup, sku: Optional[str]) -> Option
 
     return None
 
+
 # ---------------------- PRODUCT PAGE PARSING ----------------------
 
 
@@ -308,6 +548,12 @@ def parse_product_page(
 
     html = r.text
     soup = BeautifulSoup(html, "html.parser")
+
+    # ---- AVAILABILITY FILTER ----
+    if not is_available_in_store(soup):
+        logging.info("Skipping %s (not stocked at store %s)", url, STORE_ID)
+        return None
+    # -----------------------------
 
     # --- SKU ---
     sku = extract_sku_from_text(html)
@@ -375,6 +621,7 @@ def scrape_products(
 
     logging.info("Parsed %d unique products successfully", len(rows))
     return rows
+
 
 # ---------------------- OUTPUT HELPERS ----------------------
 
@@ -455,6 +702,7 @@ def download_images(session: requests.Session, rows: List[Dict[str, str]]) -> No
 
     logging.info("Image download step complete.")
 
+
 # ---------------------- MAIN ----------------------
 
 
@@ -462,11 +710,15 @@ def main() -> None:
     ensure_dirs()
     session = make_session()
 
-    # Scope to San Leandro store
+    # Scope to San Leandro store (cookies / context for store #238)
     set_store_context(session)
 
+    logging.info("Discovering category slugs from sitemap...")
+    category_slugs = discover_category_slugs(session)
+    logging.info("Using %d category slugs", len(category_slugs))
+
     logging.info("Discovering product URLs from category pages...")
-    product_urls_by_category = fetch_all_product_urls(session)
+    product_urls_by_category = fetch_all_product_urls(session, category_slugs)
 
     logging.info("Starting product scrape...")
     products = scrape_products(session, product_urls_by_category)
@@ -477,7 +729,12 @@ def main() -> None:
     logging.info("Saving metadata...")
     save_metadata(products, METADATA_CSV)
 
-    logging.info("Done. Metadata -> %s, images -> %s/", METADATA_CSV, IMAGES_DIR)
+    logging.info(
+        "Done. Metadata -> %s (%d products), images -> %s/",
+        METADATA_CSV,
+        len(products),
+        IMAGES_DIR,
+    )
 
 
 if __name__ == "__main__":
