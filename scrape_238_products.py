@@ -665,16 +665,14 @@ def download_images(session: requests.Session, rows: List[Dict[str, str]]) -> No
     for row in rows:
         sku = row["sku"]
         img_url = row.get("image_url")
-        if not img_url:
-            logging.info("Skipping SKU %s (no image_url)", sku)
-            row["image_filename"] = ""
+        img_filename = row.get("image_filename")
+        if not img_url or not img_filename:
             continue
 
-        img_path = os.path.join(IMAGES_DIR, f"{sku}.jpg")
-        row["image_filename"] = os.path.basename(img_path)
+        img_path = os.path.join(IMAGES_DIR, img_filename)
 
+        # --- NEW: skip if image already exists ---
         if os.path.exists(img_path):
-            logging.info("Image already exists for SKU %s, skipping", sku)
             continue
 
         logging.info("Downloading image for SKU %s: %s", sku, img_url)
@@ -691,17 +689,27 @@ def download_images(session: requests.Session, rows: List[Dict[str, str]]) -> No
                     resp.status_code,
                 )
         except Exception as e:
-            logging.warning(
-                "Error downloading image for SKU %s (%s): %s",
-                sku,
-                img_url,
-                e,
-            )
+            logging.warning("Exception downloading image for SKU %s: %s", sku, e)
 
-        time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-    logging.info("Image download step complete.")
 
+def load_existing_metadata(csv_path: str) -> Dict[str, Dict[str, str]]:
+    """
+    Load existing CSV (if present) into a dict keyed by SKU.
+    """
+    existing: Dict[str, Dict[str, str]] = {}
+    if not os.path.exists(csv_path):
+        return existing
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sku = row.get("sku")
+            if not sku:
+                continue
+            existing[sku] = row
+    logging.info("Loaded %d existing rows from %s", len(existing), csv_path)
+    return existing
 
 # ---------------------- MAIN ----------------------
 
@@ -713,6 +721,9 @@ def main() -> None:
     # Scope to San Leandro store (cookies / context for store #238)
     set_store_context(session)
 
+    # 1) Load any existing metadata so we can merge
+    existing_by_sku = load_existing_metadata(METADATA_CSV)
+
     logging.info("Discovering category slugs from sitemap...")
     category_slugs = discover_category_slugs(session)
     logging.info("Using %d category slugs", len(category_slugs))
@@ -721,20 +732,41 @@ def main() -> None:
     product_urls_by_category = fetch_all_product_urls(session, category_slugs)
 
     logging.info("Starting product scrape...")
-    products = scrape_products(session, product_urls_by_category)
+    scraped_rows = scrape_products(session, product_urls_by_category)
 
-    logging.info("Downloading images...")
-    download_images(session, products)
+    # 2) Build dict for new scrape
+    scraped_by_sku: Dict[str, Dict[str, str]] = {}
+    for row in scraped_rows:
+        sku = row.get("sku")
+        if not sku:
+            continue
+        scraped_by_sku[sku] = row
 
-    logging.info("Saving metadata...")
-    save_metadata(products, METADATA_CSV)
+    # 3) Figure out which SKUs are truly new
+    new_skus = [sku for sku in scraped_by_sku.keys() if sku not in existing_by_sku]
+    new_rows = [scraped_by_sku[sku] for sku in new_skus]
+    logging.info("Found %d new SKUs (out of %d scraped)", len(new_rows), len(scraped_rows))
+
+    # 4) Merge existing + scraped (scraped overrides if same SKU)
+    merged_by_sku = existing_by_sku.copy()
+    merged_by_sku.update(scraped_by_sku)
+    merged_rows = list(merged_by_sku.values())
+
+    # 5) Download images only for new SKUs
+    download_images(session, new_rows)
+
+    # 6) Save full merged metadata back to the same CSV
+    logging.info("Saving metadata (merged existing + new)...")
+    save_metadata(merged_rows, METADATA_CSV)
 
     logging.info(
-        "Done. Metadata -> %s (%d products), images -> %s/",
+        "Done. Metadata -> %s (%d products total), images -> %s/ (new: %d)",
         METADATA_CSV,
-        len(products),
+        len(merged_rows),
         IMAGES_DIR,
+        len(new_rows),
     )
+
 
 
 if __name__ == "__main__":
