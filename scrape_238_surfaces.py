@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Scrape Floor & Decor product metadata & images for the
+Scrape Floor & Decor WOOD / PORCELAIN / STONE product metadata & images for the
 San Leandro store (storeID=238).
 
 Outputs:
-  - data/san_leandro_products.csv
-  - images/<SKU>.jpg
+  - data/san_leandro_surfaces.csv
+  - images/<SKU>.jpg   (if image_filename is set and download_images is wired)
 
 Run from repo root:
   .\.venv\Scripts\Activate.ps1
-  python scrape_238_products.py
+  python scrape_238_surfaces.py
 """
 
 import csv
@@ -29,25 +29,23 @@ from bs4 import BeautifulSoup, NavigableString
 BASE_URL = "https://www.flooranddecor.com"
 STORE_ID = 238  # San Leandro
 
-# Seed category slugs to make sure we at least cover these
+# Only seed the categories we actually care about
 CATEGORY_SLUGS = [
-    "/tile",
-    "/wood",
-    "/vinyl",
-    "/laminate",
-    "/stone",
-    "/decoratives",
+    "/tile",   # porcelain tile lives here
+    "/wood",   # hardwood / engineered wood
+    "/stone",  # natural stone tile
 ]
 
 DATA_DIR = "data"
 IMAGES_DIR = "images"
-METADATA_CSV = os.path.join(DATA_DIR, "san_leandro_products.csv")
+METADATA_CSV = os.path.join(DATA_DIR, "san_leandro_surfaces.csv")
 
 REQUEST_TIMEOUT = 15
 SLEEP_BETWEEN_REQUESTS = 0.5  # seconds between requests
 
-# Safety valve so we don't accidentally spider the entire internet
-MAX_PAGES_PER_CATEGORY = 10000
+# Safety valves
+MAX_PAGES_PER_CATEGORY = 10_000
+MAX_PRODUCTS = 10_000  # hard cap on number of products scraped
 
 # Product URL pattern:
 # e.g. https://www.flooranddecor.com/...-101363893.html
@@ -59,7 +57,7 @@ PRODUCT_URL_RE = re.compile(
 
 # Category / URL substrings we want to completely avoid crawling
 EXCLUDE_CATEGORY_SUBSTRINGS = [
-    # Big buckets
+    # Big buckets (we don't want these at all)
     "installation-materials",
     "installation",
     "decorative-hardware",
@@ -89,7 +87,7 @@ EXCLUDE_CATEGORY_SUBSTRINGS = [
     "membrane",
 ]
 
-# Product name tokens we consider "not tiles/wood/deco"
+# Product name tokens we consider *not* surfaces (materials, tools, etc.)
 EXCLUDE_PRODUCT_NAME_TOKENS = [
     # Installation materials
     "thinset",
@@ -113,7 +111,6 @@ EXCLUDE_PRODUCT_NAME_TOKENS = [
     "countertop",
     "counter top",
     "counter tops",
-    "slab",
     # Doors / knobs / hardware
     "door",
     "doors",
@@ -130,6 +127,30 @@ EXCLUDE_PRODUCT_NAME_TOKENS = [
     "cabinet hardware",
     "cabinet knob",
     "cabinet pull",
+]
+
+# Tokens that define the surfaces we *do* want: wood, porcelain, stone
+ALLOWED_SURFACE_TOKENS = [
+    # Wood
+    "wood",
+    "hardwood",
+    "engineered wood",
+    "engineered hardwood",
+    "oak",
+    "hickory",
+    "maple",
+    "bamboo",
+    # Porcelain
+    "porcelain",
+    # Stone / stone types
+    "stone",
+    "marble",
+    "travertine",
+    "granite",
+    "limestone",
+    "slate",
+    "quartzite",
+    "ledger",
 ]
 
 
@@ -191,9 +212,9 @@ def discover_category_slugs(session: requests.Session) -> List[str]:
     Hit the site-wide sitemap and collect a *broad* set of category-like URLs.
     We:
       * start from CATEGORY_SLUGS
-      * add any internal, non-product URL whose path contains flooring-ish
-        keywords (tile, wood, vinyl, laminate, floor, wall, etc.), while
-        skipping installation materials, vanities, countertops, doors, hardware.
+      * add any internal, non-product URL whose path contains wood/tile/stone-ish
+        keywords, while skipping installation materials, vanities, countertops,
+        doors, hardware, etc.
     """
     sitemap_url = urljoin(BASE_URL, "/sitemap")
     slugs: Set[str] = set(CATEGORY_SLUGS)  # start from your existing list
@@ -209,27 +230,18 @@ def discover_category_slugs(session: requests.Session) -> List[str]:
 
     soup = BeautifulSoup(r.text, "html.parser")
 
+    # Only keep category-like URLs that are relevant to surfaces
     category_keywords = [
         "tile",
         "stone",
         "wood",
-        "vinyl",
-        "laminate",
-        "bathroom",
-        "kitchen",
-        "backsplash",
-        "decor",
         "mosaic",
-        # "countertop",  # intentionally excluded via EXCLUDE_CATEGORY_SUBSTRINGS
         "floor",
         "wall",
         "stair",
-        # "installation",  # filtered below
-        "fixtures",
-        "tools",
-        "grout",
-        "thinset",
-        "adhesive",
+        "backsplash",
+        "bathroom",
+        "kitchen",
     ]
 
     skip_prefixes = (
@@ -269,7 +281,7 @@ def discover_category_slugs(session: requests.Session) -> List[str]:
         if low.startswith(skip_prefixes):
             continue
 
-        # NEW: skip categories we don't care about at all
+        # Skip categories we don't care about at all
         if any(bad in low for bad in EXCLUDE_CATEGORY_SUBSTRINGS):
             continue
 
@@ -277,7 +289,7 @@ def discover_category_slugs(session: requests.Session) -> List[str]:
         if low.endswith(".html"):
             continue
 
-        # Only keep URLs that look flooring-related
+        # Only keep URLs that look surface-related
         if any(kw in low for kw in category_keywords):
             slugs.add(href)
 
@@ -295,12 +307,8 @@ def fetch_product_urls_for_category(
     Given a category slug like "/tile", crawl ALL listing / filter / search pages
     reachable under that slug and extract product detail URLs using PRODUCT_URL_RE.
 
-    This is intentionally aggressive:
-      * Any internal link whose URL mentions the category token ("/tile" or "tile")
-        is followed (up to MAX_PAGES_PER_CATEGORY pages).
-      * We don't limit ourselves only to 'start=', 'page=', etc. query params anymore.
-      * But we *do* skip unwanted categories (installation materials, vanities,
-        countertops, doors, knobs, etc.)
+    We stay inside tile/wood/stone-ish pages and skip unwanted categories like
+    installation materials, vanities, countertops, doors, knobs, etc.
     """
     start_url = urljoin(BASE_URL, category_slug)
 
@@ -371,7 +379,7 @@ def fetch_product_urls_for_category(
 
             href_low = href.lower()
 
-            # NEW: don't even walk into "bad" sections
+            # Don't even walk into "bad" sections
             if any(bad in href_low for bad in EXCLUDE_CATEGORY_SUBSTRINGS):
                 continue
 
@@ -441,10 +449,6 @@ def is_available_in_store(soup: BeautifulSoup) -> bool:
       - If that block says 'Item will be shipped and should arrive in X days',
         treat it as NOT stocked locally (ship-to-store only) and skip.
       - Otherwise, keep it.
-
-    This specifically filters cases like:
-      In-Store Pickup
-      Item will be shipped and should arrive in 7-10 days.
     """
 
     # Find the "In-Store Pickup" label as a text node
@@ -687,12 +691,18 @@ def parse_product_page(
         part for part in [name, category_slug, url] if part
     ).lower()
 
+    # 1) Exclude obvious non-surface products
     if any(tok in combined_for_filter for tok in EXCLUDE_PRODUCT_NAME_TOKENS):
         logging.info("Skipping %s (excluded product type: %s)", url, name)
         return None
 
     if url_is_excluded(url):
         logging.info("Skipping %s (excluded by URL path)", url)
+        return None
+
+    # 2) Keep ONLY wood / porcelain / stone surfaces
+    if not any(tok in combined_for_filter for tok in ALLOWED_SURFACE_TOKENS):
+        logging.info("Skipping %s (not wood/porcelain/stone): %s", url, name)
         return None
 
     # --- Image URL ---
@@ -705,7 +715,7 @@ def parse_product_page(
         "category_slug": category_slug,
         "product_url": url,
         "image_url": image_url or "",
-        # image_filename will be filled in later by download_images()
+        # image_filename can be added if you want fixed naming, e.g. f"{sku}.jpg"
     }
 
 
@@ -719,6 +729,13 @@ def scrape_products(
     for category, urls in product_urls_by_category.items():
         logging.info("Scraping %d products for category %s", len(urls), category)
         for url in urls:
+            # Hard cap on total products
+            if len(rows) >= MAX_PRODUCTS:
+                logging.info(
+                    "Reached MAX_PRODUCTS=%d, stopping scrape.", MAX_PRODUCTS
+                )
+                return rows
+
             meta = parse_product_page(session, url, category)
             if not meta:
                 continue
@@ -843,7 +860,7 @@ def main() -> None:
     logging.info("Discovering product URLs from category pages...")
     product_urls_by_category = fetch_all_product_urls(session, category_slugs)
 
-    logging.info("Starting product scrape...")
+    logging.info("Starting product scrape (wood/porcelain/stone only)...")
     scraped_rows = scrape_products(session, product_urls_by_category)
 
     # 2) Build dict for new scrape
@@ -864,7 +881,7 @@ def main() -> None:
     merged_by_sku.update(scraped_by_sku)
     merged_rows = list(merged_by_sku.values())
 
-    # 5) Download images only for new SKUs
+    # 5) Download images only for new SKUs (if image_filename is set)
     download_images(session, new_rows)
 
     # 6) Save full merged metadata back to the same CSV
@@ -878,7 +895,6 @@ def main() -> None:
         IMAGES_DIR,
         len(new_rows),
     )
-
 
 if __name__ == "__main__":
     main()
