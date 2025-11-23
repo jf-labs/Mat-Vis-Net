@@ -47,7 +47,7 @@ REQUEST_TIMEOUT = 15
 SLEEP_BETWEEN_REQUESTS = 0.5  # seconds between requests
 
 # Safety valve so we don't accidentally spider the entire internet
-MAX_PAGES_PER_CATEGORY = 10000
+MAX_PAGES_PER_CATEGORY = 10_000
 
 # Product URL pattern:
 # e.g. https://www.flooranddecor.com/...-101363893.html
