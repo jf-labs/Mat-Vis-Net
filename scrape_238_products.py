@@ -32,10 +32,8 @@ STORE_ID = 238  # San Leandro
 # Seed category slugs to make sure we at least cover these
 CATEGORY_SLUGS = [
     "/tile",
-    "/wood",
-    "/vinyl",
-    "/laminate",
     "/stone",
+    "/wood",
     "/decoratives",
 ]
 
@@ -836,9 +834,12 @@ def main() -> None:
     # 1) Load any existing metadata so we can merge
     existing_by_sku = load_existing_metadata(METADATA_CSV)
 
-    logging.info("Discovering category slugs from sitemap...")
-    category_slugs = discover_category_slugs(session)
-    logging.info("Using %d category slugs", len(category_slugs))
+    # Only crawl tile, stone, wood, and decorative surface categories
+    category_slugs = CATEGORY_SLUGS
+    logging.info(
+        "Using fixed surface category slugs (tile/stone/wood/decoratives): %s",
+        category_slugs,
+    )
 
     logging.info("Discovering product URLs from category pages...")
     product_urls_by_category = fetch_all_product_urls(session, category_slugs)
