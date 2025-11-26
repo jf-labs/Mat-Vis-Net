@@ -53,6 +53,58 @@ PRODUCT_URL_RE = re.compile(
     r"https://www\.flooranddecor\.com/[A-Za-z0-9_\-/]+-(\d{6,})\.html"
 )
 
+# ---------------------- CSV FIELD MANAGEMENT ----------------------
+# You said you want to keep *all* of these columns, without deleting anything:
+# sku,name,category_slug,product_url,image_url,image_filename,
+# row_id,cluster_id,pca_x,pca_y,surface_type,material_group,cluster_size
+
+REQUIRED_FIELD_ORDER = [
+    "sku",
+    "name",
+    "category_slug",
+    "product_url",
+    "image_url",
+    "image_filename",
+    "row_id",
+    "cluster_id",
+    "pca_x",
+    "pca_y",
+    "surface_type",
+    "material_group",
+    "cluster_size",
+]
+
+
+def compute_fieldnames(rows: List[Dict[str, str]]) -> List[str]:
+    """
+    Build the final CSV header:
+
+      1. Start with REQUIRED_FIELD_ORDER (in that order).
+      2. Append *any other* columns that already exist in the data.
+
+    This way we:
+      - Never lose your clustering columns.
+      - Also keep any extra columns you might add later in notebooks.
+    """
+    fieldnames: List[str] = []
+    seen: Set[str] = set()
+
+    # 1) Seed with required order
+    for col in REQUIRED_FIELD_ORDER:
+        if col not in seen:
+            seen.add(col)
+            fieldnames.append(col)
+
+    # 2) Add any additional keys from the rows
+    for row in rows:
+        for col in row.keys():
+            if col not in seen:
+                seen.add(col)
+                fieldnames.append(col)
+
+    return fieldnames
+
+
 # ---------------------- EXCLUSION FILTERS ----------------------
 
 # Category / URL substrings we want to completely avoid crawling
@@ -439,10 +491,6 @@ def is_available_in_store(soup: BeautifulSoup) -> bool:
       - If that block says 'Item will be shipped and should arrive in X days',
         treat it as NOT stocked locally (ship-to-store only) and skip.
       - Otherwise, keep it.
-
-    This specifically filters cases like:
-      In-Store Pickup
-      Item will be shipped and should arrive in 7-10 days.
     """
 
     # Find the "In-Store Pickup" label as a text node
@@ -697,14 +745,34 @@ def parse_product_page(
     image_url = extract_product_image_url(soup, sku)
     logging.debug("SKU %s -> image_url: %s", sku, image_url)
 
-    return {
+    row: Dict[str, str] = {
         "sku": sku,
         "name": name,
         "category_slug": category_slug,
         "product_url": url,
         "image_url": image_url or "",
-        # image_filename will be filled in later by download_images()
+        # image_filename set below
     }
+
+    # Default filename for new rows if we have an image
+    if row["image_url"]:
+        row["image_filename"] = f"{sku}.jpg"
+    else:
+        row["image_filename"] = ""
+
+    # Extra fields start blank for new products
+    for extra in [
+        "row_id",
+        "cluster_id",
+        "pca_x",
+        "pca_y",
+        "surface_type",
+        "material_group",
+        "cluster_size",
+    ]:
+        row.setdefault(extra, "")
+
+    return row
 
 
 def scrape_products(
@@ -742,28 +810,31 @@ def ensure_dirs() -> None:
 
 
 def save_metadata(rows: List[Dict[str, str]], csv_path: str) -> None:
+    """
+    Write out *all* metadata.
+
+    - Uses REQUIRED_FIELD_ORDER first, then any extra columns found in the rows.
+    - For every row, we make sure every fieldname exists (missing -> "").
+    - This preserves your clustering columns (and any other notebook columns)
+      instead of wiping them out.
+    """
     if not rows:
         logging.info("No rows to save, skipping CSV write.")
         return
 
-    fieldnames = [
-        "sku",
-        "name",
-        "category_slug",
-        "product_url",
-        "image_url",
-        "image_filename",
-    ]
+    fieldnames = compute_fieldnames(rows)
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+
         for row in rows:
-            out_row = row.copy()
-            out_row.setdefault("image_filename", "")
+            out_row = {}
+            for col in fieldnames:
+                out_row[col] = row.get(col, "")
             writer.writerow(out_row)
 
-    logging.info("Metadata written to %s (%d rows)", csv_path, len(rows))
+    logging.info("Metadata written to %s (%d rows, %d columns)", csv_path, len(rows), len(fieldnames))
 
 
 def download_images(session: requests.Session, rows: List[Dict[str, str]]) -> None:
@@ -805,6 +876,7 @@ def download_images(session: requests.Session, rows: List[Dict[str, str]]) -> No
 def load_existing_metadata(csv_path: str) -> Dict[str, Dict[str, str]]:
     """
     Load existing CSV (if present) into a dict keyed by SKU.
+    Keeps *all* columns found in the CSV.
     """
     existing: Dict[str, Dict[str, str]] = {}
     if not os.path.exists(csv_path):
@@ -860,12 +932,42 @@ def main() -> None:
     new_rows = [scraped_by_sku[sku] for sku in new_skus]
     logging.info("Found %d new SKUs (out of %d scraped)", len(new_rows), len(scraped_rows))
 
-    # 4) Merge existing + scraped (scraped overrides if same SKU)
-    merged_by_sku = existing_by_sku.copy()
-    merged_by_sku.update(scraped_by_sku)
+    # 4) Merge existing + scraped WITHOUT clobbering extra columns
+    merged_by_sku: Dict[str, Dict[str, str]] = {}
+
+    # Start with existing rows as-is
+    for sku, row in existing_by_sku.items():
+        merged_by_sku[sku] = row.copy()
+
+    # Update/insert scraped rows
+    base_fields_to_update = ["name", "category_slug", "product_url", "image_url", "image_filename"]
+
+    for sku, scraped_row in scraped_by_sku.items():
+        if sku in merged_by_sku:
+            # Existing row: keep all existing keys, patch only base metadata if scraped has non-empty value
+            existing_row = merged_by_sku[sku]
+            for key in base_fields_to_update:
+                val = scraped_row.get(key)
+                if val:  # only overwrite if scraper found something non-empty
+                    existing_row[key] = val
+        else:
+            # Brand new SKU: take scraped row, make sure extra fields exist
+            new_row = scraped_row.copy()
+            for extra in [
+                "row_id",
+                "cluster_id",
+                "pca_x",
+                "pca_y",
+                "surface_type",
+                "material_group",
+                "cluster_size",
+            ]:
+                new_row.setdefault(extra, "")
+            merged_by_sku[sku] = new_row
+
     merged_rows = list(merged_by_sku.values())
 
-    # 5) Download images only for new SKUs
+    # 5) Download images only for truly new SKUs
     download_images(session, new_rows)
 
     # 6) Save full merged metadata back to the same CSV
