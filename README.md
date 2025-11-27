@@ -8,65 +8,57 @@ Image-based product matcher for flooring and tile — given a photo of a plank, 
 
 ### 1. Clone the repository
 
-    git clone <your-repo-url>.git
-    cd Mat-Vis-Net
+```
+git clone <your-repo-url>.git
+cd Mat-Vis-Net
+```
 
 ### 2. Set up the Python environment
 
-Create and activate a virtual environment:
+```
+python -m venv venv
+```
 
-    python -m venv .venv
+Activate it:
 
-Windows:
+- Windows: `venv\Scripts\activate`
+- macOS / Linux: `source venv/bin/activate`
 
-    .venv\Scripts\activate
+Install backend dependencies:
 
-macOS / Linux:
+```
+pip install fastapi "uvicorn[standard]" numpy pandas scikit-learn
+```
 
-    source .venv/bin/activate
+### 3. Pull the latest Store 238 catalog
 
-Install dependencies:
+```
+python scrape_238_products.py
+```
 
-    pip install -r requirements.txt
+The scraper narrows the crawl to surface materials, enforces in-store availability, updates `data/san_leandro_products.csv`, and downloads product photos into `images/`.
 
-### 3. Configure environment variables (optional)
+### 4. Build image embeddings
 
-If you need API keys or custom settings later, copy the example env file:
+Use `notebooks/01_embeddings_and_knn.ipynb` to generate `data/image_embs.npy` aligned with the CSV rows (automation script coming soon). The FastAPI service expects both the CSV and the embedding file.
 
-    cp .env.example .env
+### 5. Start the API
 
-Then edit `.env` as needed.
+```
+python -m uvicorn backend.app:app --host 127.0.0.1 --port 8010
+```
 
-### 4. Scrape products for Store 238
+The service exposes `/similar-by-sku` and serves product images at `/images/<filename>`.
 
-Run the scraper from the repo root:
+### 6. Launch the web client
 
-    python scrape_238_products.py
+```
+cd matvis-web
+npm install
+npm run dev
+```
 
-This will:
-
-- Set the store context to **San Leandro (Store 238)**.
-- Crawl **surface-related categories only** (tile, stone, wood, decoratives).
-- Skip installation materials, vanities, countertops, doors, hardware, etc.
-- Filter out products that are **not actually stocked** at Store 238.
-- Merge new SKUs into the existing CSV **without deleting or reordering your analysis columns**.
-- Download primary product images for new SKUs only.
-
-Artifacts:
-
-- `data/san_leandro_products.csv` — product metadata for Store 238  
-- `images/<SKU>.jpg` — primary product images, named by SKU
-
-### 5. Run the prototype notebooks
-
-Launch Jupyter:
-
-    jupyter notebook
-
-Then open:
-
-- `notebooks/01_embeddings_and_knn.ipynb` — build CLIP embeddings and a kNN index over the catalog.
-- `notebooks/02_clustering_and_viz.ipynb` — visualize embeddings (PCA / UMAP) and analyze clusters by material.
+By default the React app talks to `http://127.0.0.1:8010`. Set `VITE_API_BASE_URL` in `matvis-web/.env.local` if you run the API elsewhere.
 
 ---
 
@@ -161,6 +153,27 @@ These visualizations support storytelling such as:
 
 ---
 
+## Backend API
+
+- `backend/model.py` loads `data/san_leandro_products.csv` together with `data/image_embs.npy`, filters out rows without images, tags each item with a coarse `material_bucket`, and builds a cosine kNN index using scikit-learn.
+- `backend/app.py` boots a FastAPI service that:
+  - initialises the model on startup,
+  - exposes `GET /similar-by-sku?sku=<SKU>&k=<int>` returning the query product plus neighbours (including distances and `image_url` values),
+  - exposes `GET /health` for simple probes, and
+  - mounts `/images` so the web client can render product photography straight from disk.
+- Run it locally with `python -m uvicorn backend.app:app --host 127.0.0.1 --port 8010`. Adjust the host/port as needed and set `VITE_API_BASE_URL` for the frontend if you diverge from that default.
+
+---
+
+## Web UI
+
+- `matvis-web/` is a Vite + React app that lets you enter a SKU and browse similar products.
+- `npm run dev` serves the UI on `http://localhost:5173` and forwards API calls to the base URL defined by `VITE_API_BASE_URL` (defaults to `http://127.0.0.1:8010`).
+- Cards render the query result and neighbours with SKU, product name, category slug, material bucket, cosine distance, and the hero image streamed from FastAPI (`/images/<filename>`).
+- For a production build, run `npm run build` and deploy the generated static assets behind a proxy that routes API calls to the FastAPI service.
+
+---
+
 ## Algorithm
 
 The retrieval pipeline is a **content-based image retrieval** system on top of a pretrained vision–language model and a kNN index.
@@ -209,17 +222,17 @@ What’s implemented:
   - Embedding product images with a CLIP-style encoder.
   - Building a kNN index for similarity search.
   - Visualizing embeddings with PCA and clustering by material.
+- FastAPI service (`backend/`) that loads pre-computed embeddings, hosts `/similar-by-sku`, serves `/images`, and provides a `/health` probe.
+- React/Vite dev client (`matvis-web/`) that queries the API, renders similarity results, and can be built for static hosting.
 
 Planned / in progress:
 
 - More complete metadata schema:
   - Material, finish, size, price, coverage, in-stock flags, etc.
 - Stable embedding pipeline (CLI / script) outside the notebooks.
-- kNN service or FAISS-based index for scalable similarity search.
-- HTTP API (e.g., FastAPI) for:
-  - `POST /search/image` → returns matching SKUs.
-- Frontend UI under `apps/client`:
-  - Simple web app where you upload or pick an image and browse matches.
+- Image-based search endpoint (e.g., `POST /search/image`) with automatic embedding.
+- FAISS or another ANN backend for scalable similarity search.
+- Enhanced UI flows (image upload, filters, analytics dashboards).
 - More advanced clustering & analysis:
   - Identify “visual families” inside each material group.
   - Use clusters to drive faceted browsing and recommendations.
@@ -235,13 +248,13 @@ In use:
 - Data handling: `pandas`, `csv`, standard library
 - Embeddings: CLIP-style vision encoder (via Hugging Face or similar)
 - Similarity search: scikit-learn `NearestNeighbors`
+- API: FastAPI + Uvicorn
+- Frontend: React + Vite
 - Exploration / analysis: Jupyter Notebook, PCA, clustering
 
 Planned / in progress:
 
 - Vector search: FAISS or similar for large catalogs
-- Backend API: FastAPI (or another modern Python web framework)
-- Frontend: React-based client in `apps/client`
 - Infra: deployment scripts and configs under `infra/`
 
 ---
@@ -249,30 +262,36 @@ Planned / in progress:
 ## Repository Structure
 
     .
-    ├── .venv/                        # Local Python virtual environment (ignored by git)
+    ├── venv/                         # Local Python virtual environment (ignored by git)
+    ├── backend/
+    │   ├── app.py                    # FastAPI app (health check, similar-by-sku, static images)
+    │   └── model.py                  # CSV/embedding loader, kNN search helpers
     ├── apps/
-    │   └── client/
-    │       ├── package.json          # Frontend dependencies and scripts (WIP)
-    │       ├── src/                  # React frontend source (planned / in progress)
-    │       └── index.html            # Frontend entry HTML
+    │   └── client/                   # Legacy HTML upload tester (kept for reference)
     ├── data/
     │   └── san_leandro_products.csv  # Scraped product metadata for Store 238
     ├── images/
     │   └── <SKU>.jpg                 # Downloaded product images named by SKU
     ├── infra/                        # Infrastructure and deployment configuration (WIP)
+    ├── matvis-mobile/                # Expo prototype (placeholder)
+    ├── matvis-web/                   # React + Vite SKU similarity client
+    │   ├── src/
+    │   │   ├── assets/App.jsx        # UI rendering similar results
+    │   │   └── main.jsx              # React entry point
+    │   ├── package.json
+    │   └── vite.config.js
     ├── notebooks/
     │   ├── 01_embeddings_and_knn.ipynb   # Build embeddings + kNN index
     │   └── 02_clustering_and_viz.ipynb   # PCA/UMAP + clustering visualizations
-    ├── src/                          # Backend / API / model code (planned / WIP)
-    ├── .env.example                  # Example environment configuration
     ├── .gitignore                    # Git ignore rules
     ├── flow.drawio.png               # System / data flow diagram
-    ├── requirements.txt              # Python dependencies
     ├── scrape_238_products.py        # Scraper for Floor & Decor Store 238
     └── README.md                     # Project documentation (this file)
 
 Core workflow:
 
-1. Run `scrape_238_products.py` to refresh the dataset.  
-2. Use `notebooks/01_embeddings_and_knn.ipynb` to build embeddings and similarity search.  
-3. Use `notebooks/02_clustering_and_viz.ipynb` to understand and visualize the embedding space by material.
+1. Run `scrape_238_products.py` to refresh the dataset (metadata + images).  
+2. Generate embeddings via `notebooks/01_embeddings_and_knn.ipynb` and save them as `data/image_embs.npy`.  
+3. Start the FastAPI service (`python -m uvicorn backend.app:app --host 127.0.0.1 --port 8010`).  
+4. Launch the React client from `matvis-web/` (`npm run dev`) to explore results interactively.  
+5. Use `notebooks/02_clustering_and_viz.ipynb` for deeper analysis and storytelling.
