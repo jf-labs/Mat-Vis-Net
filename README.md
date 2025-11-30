@@ -1,4 +1,5 @@
-# Material Visual Network
+# Material Visual Network - Check it out at https://matvisnetui.onrender.com/! 
+(Deployed version is not linked to this repo)
 
 Image-based product matcher for flooring and tile — given a photo of a plank, tile, or decorative piece, return the closest matching SKUs from a store catalog (currently Floor & Decor, San Leandro – Store 238).
 
