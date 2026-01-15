@@ -103,9 +103,14 @@ function App() {
 }
 
 function ProductCard({ product }) {
-  const imgUrl = product.image_url
-    ? `${API_BASE}${product.image_url}`
-    : null;
+  let imgUrl =
+    product.image_proxy_url?.trim() ||
+    product.image_url?.trim() ||
+    null;
+  if (imgUrl && !/^https?:\/\//i.test(imgUrl)) {
+    const suffix = imgUrl.startsWith("/") ? imgUrl : `/${imgUrl}`;
+    imgUrl = `${API_BASE}${suffix}`;
+  }
 
   return (
     <div
